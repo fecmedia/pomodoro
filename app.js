@@ -56,8 +56,32 @@ function status(text) {
   clearTimeout(statusTimer); statusTimer = setTimeout(() => (el.textContent = ''), 6000);
 }
 
-// ===== Timer (Zeitstempel statt Zählen: bleibt im Hintergrund genau) =====
+// ===== Timer & Kalender-Logging für Arbeit & Pausen =====
 let timer = null;
+
+function logPartialSession() {
+  const total = totalMs();
+  const left = running() ? Math.max(0, st.endAt - Date.now()) : st.remaining;
+  const elapsedMs = total - left;
+  const elapsedMins = Math.round(elapsedMs / 60000);
+
+  // Ab 1 Minute Laufzeit eintragen
+  if (elapsedMins >= 1) {
+    const end = new Date();
+    const start = new Date(end.getTime() - elapsedMs);
+    const isFocus = st.mode === 'focus';
+    
+    if (isFocus) {
+      st.count++;
+      st.minutes += elapsedMins;
+      status(`Abgebrochene Session (${elapsedMins} Min.) gespeichert.`);
+    } else {
+      status(`Abgebrochene Pause (${elapsedMins} Min.) gespeichert.`);
+    }
+    queueEvent(start, end, st.mode);
+  }
+}
+
 function tick() {
   if (!running()) return;
   if (st.endAt - Date.now() <= 0) complete(); else render();
@@ -73,11 +97,13 @@ function pause() {
   clearInterval(timer); releaseLock(); persist(); render();
 }
 function reset() {
+  logPartialSession();
   clearInterval(timer); releaseLock();
   st.endAt = null; st.remaining = totalMs(); persist(); snapRender();
 }
 function setMode(m, force) {
   if (!force && running() && !confirm('Laufende Phase abbrechen?')) return;
+  if (!force) logPartialSession();
   clearInterval(timer); releaseLock();
   st.mode = m; st.endAt = null; st.remaining = totalMs(); persist(); snapRender();
 }
@@ -85,16 +111,20 @@ function complete(quiet) {
   clearInterval(timer); releaseLock();
   const end = new Date(Math.min(st.endAt ?? Date.now(), Date.now()));
   st.endAt = null;
-  const wasFocus = st.mode === 'focus';
-  if (wasFocus) {
+  const currentMode = st.mode;
+  
+  if (currentMode === 'focus') {
     st.completed++; st.count++; st.minutes += settings.focus;
-    queueEvent(new Date(end - settings.focus * 60000), end);
+    queueEvent(new Date(end - settings.focus * 60000), end, 'focus');
+  } else {
+    queueEvent(new Date(end - settings[currentMode] * 60000), end, currentMode);
   }
-  const next = wasFocus ? (st.completed % 4 === 0 ? 'long' : 'break') : 'focus';
+
+  const next = currentMode === 'focus' ? (st.completed % 4 === 0 ? 'long' : 'break') : 'focus';
   if (!quiet) {
     chime();
-    if (document.hidden) notify(wasFocus ? 'Fokus-Session beendet' : 'Pause vorbei', `Als Nächstes: ${LABEL[next]}`);
-    status(wasFocus ? 'Session beendet. Zeit für eine Pause.' : 'Pause vorbei. Bereit für die nächste Session?');
+    if (document.hidden) notify(currentMode === 'focus' ? 'Fokus-Session beendet' : 'Pause vorbei', `Als Nächstes: ${LABEL[next]}`);
+    status(currentMode === 'focus' ? 'Session beendet. Zeit für eine Pause.' : 'Pause vorbei. Bereit für die nächste Session?');
   }
   setMode(next, true);
 }
@@ -189,12 +219,25 @@ $('#cal').addEventListener('click', () => {
   } else tokenClient.requestAccessToken({ prompt: linked() ? '' : 'consent' });
 });
 
-function queueEvent(start, end) {
+function queueEvent(start, end, mode) {
   if (!linked()) return;
-  const name = topic.value.trim() || 'Fokus-Session';
-  pending.push({ summary: `🍅 ${name}`, description: 'Automatisch erfasste Pomodoro-Session (Focus)', start: { dateTime: start.toISOString() }, end: { dateTime: end.toISOString() } });
+  const isFocus = mode === 'focus';
+  const name = isFocus ? (topic.value.trim() || 'Fokus-Session') : (mode === 'long' ? 'Lange Pause' : 'Pause');
+  
+  // Ohne Emojis – Arbeit = Lavendel (1), Pausen = Blau (9)
+  const summary = name;
+  const colorId = isFocus ? '1' : '9'; 
+
+  pending.push({
+    summary,
+    description: isFocus ? 'Automatisch erfasste Pomodoro-Session (Focus)' : 'Automatisch erfasste Pause (Focus)',
+    start: { dateTime: start.toISOString() },
+    end: { dateTime: end.toISOString() },
+    colorId
+  });
   save('focus_pending', pending); flush();
 }
+
 async function flush() {
   if (!pending.length) return;
   if (!tokenValid()) { setCal(); return status('Kalender neu verbinden, dann wird die Session eingetragen.'); }
@@ -205,7 +248,7 @@ async function flush() {
       if (res.status === 401) { token = null; sessionStorage.removeItem('gcal'); setCal(); return status('Kalender neu verbinden, dann wird die Session eingetragen.'); }
       if (!res.ok) throw new Error(res.status);
       pending.shift(); save('focus_pending', pending);
-      status(`Im Kalender gespeichert: ${ev.summary.slice(3)}`);
+      status(`Im Kalender gespeichert: ${ev.summary}`);
     } catch { return status('Kalender-Sync fehlgeschlagen. Nächster Versuch folgt.'); }
   }
 }
