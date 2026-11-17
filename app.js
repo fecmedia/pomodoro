@@ -27,7 +27,26 @@ const persist = () => save('focus_state', st);
 topic.value = load('focus_topic', '');
 topic.addEventListener('input', () => save('focus_topic', topic.value));
 
-// ===== Anzeige =====
+// ===== Anzeige & Sperrbildschirm-Widget (Media Session API) =====
+function updateMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  const left = running() ? Math.max(0, st.endAt - Date.now()) : st.remaining;
+  const secs = Math.ceil(left / 1000);
+  const t = `${pad(Math.floor(secs / 60))}:${pad(secs % 60)}`;
+  const modeLabel = LABEL[st.mode];
+  const topicText = topic.value.trim() ? ` (${topic.value.trim()})` : '';
+
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: `${t} min – ${modeLabel}${topicText}`,
+    artist: running() ? 'Focus Timer läuft' : 'Timer pausiert',
+    album: 'Pomodoro App',
+    artwork: [{ src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png' }]
+  });
+
+  navigator.mediaSession.setActionHandler('play', () => { if (!running()) start(); });
+  navigator.mediaSession.setActionHandler('pause', () => { if (running()) pause(); });
+}
+
 function render() {
   const total = totalMs();
   const left = running() ? Math.max(0, st.endAt - Date.now()) : st.remaining;
@@ -46,6 +65,8 @@ function render() {
   const filled = st.completed > 0 && st.completed % 4 === 0 && st.mode !== 'focus' ? 4 : st.completed % 4;
   document.querySelectorAll('#dots span').forEach((d, i) => d.classList.toggle('on', i < filled));
   $('#dots').setAttribute('aria-label', `${filled} von 4 Sessions`);
+
+  updateMediaSession();
 }
 function snapRender() { fill.classList.add('snap'); render(); fill.offsetWidth; fill.classList.remove('snap'); }
 
@@ -57,7 +78,6 @@ function status(text) {
 
 // ===== Timer (Zeitstempel statt Zählen: bleibt im Hintergrund genau) =====
 let timer = null;
-// Abgebrochene Phasen (Reset, Phasenwechsel) ab 1 Minute mitschreiben
 function logPartialSession() {
   const left = running() ? Math.max(0, st.endAt - Date.now()) : st.remaining;
   const elapsedMs = totalMs() - left;
@@ -109,7 +129,13 @@ function complete(quiet) {
   const next = wasFocus ? (st.completed % 4 === 0 ? 'long' : 'break') : 'focus';
   if (!quiet) {
     chime();
-    if (document.hidden) notify(wasFocus ? 'Fokus-Session beendet' : 'Pause vorbei', `Als Nächstes: ${LABEL[next]}`);
+    if (document.hidden) {
+      const notifTitle = wasFocus ? 'Fokus-Phase beendet!' : 'Pause vorbei!';
+      const notifBody = wasFocus 
+        ? 'Deine aktuelle Fokus-Phase ist vorbei. Zeit für eine Pause!' 
+        : 'Deine Pause ist vorbei. Bereit für die nächste Session?';
+      notify(notifTitle, notifBody);
+    }
     status(wasFocus ? 'Session beendet. Zeit für eine Pause.' : 'Pause vorbei. Bereit für die nächste Session?');
   }
   setMode(next, true);
@@ -166,7 +192,6 @@ let pending = load('focus_pending', []);
 const linked = () => !!localStorage.getItem('gcal_linked');
 const tokenValid = () => token && Date.now() < tokenExp;
 
-// Token dauerhaft aus localStorage laden, damit es beim Schließen des Tabs erhalten bleibt
 try {
   const s = JSON.parse(localStorage.getItem('gcal_token_data'));
   if (s && Date.now() < s.exp) { 
@@ -189,34 +214,19 @@ function initGoogle() {
       if (!r.access_token) return;
       token = r.access_token; 
       tokenExp = Date.now() + (r.expires_in - 60) * 1000;
-      try { 
-        // In localStorage speichern, damit es über Browser-Sessions hinweg erhalten bleibt
-        localStorage.setItem('gcal_token_data', JSON.stringify({ token, exp: tokenExp })); 
-      } catch {}
+      try { localStorage.setItem('gcal_token_data', JSON.stringify({ token, exp: tokenExp })); } catch {}
       localStorage.setItem('gcal_linked', '1');
-      setCal(); 
-      status('Google Kalender verbunden.'); 
-      flush();
+      setCal(); status('Google Kalender verbunden.'); flush();
     },
-    error_callback: () => {
-      setCal();
-      status('Google-Anmeldung fehlgeschlagen oder abgebrochen.');
-    },
+    error_callback: () => { setCal(); status('Google-Anmeldung fehlgeschlagen oder abgebrochen.'); },
   });
 
-  // Wenn verknüpft, aber Token abgelaufen: im Hintergrund (silent) ein neues holen
-  if (linked() && !tokenValid()) {
-    refreshTokenSilent();
-  }
+  if (linked() && !tokenValid()) refreshTokenSilent();
 }
 
 function refreshTokenSilent() {
   if (!tokenClient) return;
-  try {
-    tokenClient.requestAccessToken({ prompt: '' });
-  } catch {
-    setCal();
-  }
+  try { tokenClient.requestAccessToken({ prompt: '' }); } catch { setCal(); }
 }
 
 let tries = 0;
@@ -250,7 +260,7 @@ function queueEvent(start, end, mode) {
     description: isFocus ? 'Automatisch erfasste Pomodoro-Session (Focus)' : 'Automatisch erfasste Pause (Focus)',
     start: { dateTime: start.toISOString() },
     end: { dateTime: end.toISOString() },
-    colorId: isFocus ? '1' : '9', // Fokus = Lavendel, Pausen = Blaubeere
+    colorId: isFocus ? '1' : '9',
     extendedProperties: { private: { focusApp: '1', kind: isFocus ? 'focus' : 'break' } },
   });
   save('focus_pending', pending); flush();
@@ -259,11 +269,8 @@ function queueEvent(start, end, mode) {
 async function flush() {
   if (!pending.length) return;
   if (!tokenValid()) {
-    if (linked()) {
-      refreshTokenSilent();
-    } else {
-      setCal(); 
-    }
+    if (linked()) refreshTokenSilent();
+    else setCal();
     return;
   }
   while (pending.length) {
@@ -289,7 +296,7 @@ async function flush() {
   }
 }
 
-// ===== Statistik (Quelle: Google Kalender, damit sie auf allen Geräten gleich ist) =====
+// ===== Statistik =====
 const logGet = () => load('focus_log', []);
 function logAdd(ms, min) {
   const cut = Date.now() - 90 * 864e5;
