@@ -166,29 +166,59 @@ let pending = load('focus_pending', []);
 const linked = () => !!localStorage.getItem('gcal_linked');
 const tokenValid = () => token && Date.now() < tokenExp;
 
+// Token dauerhaft aus localStorage laden, damit es beim Schließen des Tabs erhalten bleibt
 try {
-  const s = JSON.parse(sessionStorage.getItem('gcal'));
-  if (s && Date.now() < s.exp) { token = s.token; tokenExp = s.exp; }
+  const s = JSON.parse(localStorage.getItem('gcal_token_data'));
+  if (s && Date.now() < s.exp) { 
+    token = s.token; 
+    tokenExp = s.exp; 
+  }
 } catch {}
 
 function setCal() {
   const state = tokenValid() ? 'on' : linked() ? 'expired' : 'off';
-  $('#cal-state').textContent = { on: 'Verbunden', expired: 'Verbindung abgelaufen', off: 'Nicht verbunden' }[state];
+  $('#cal-state').textContent = { on: 'Verbunden', expired: 'Verbindung wird erneuert…', off: 'Nicht verbunden' }[state];
   $('#cal-btn').textContent = { on: 'Verbindung trennen', expired: 'Neu verbinden', off: 'Kalender verbinden' }[state];
 }
+
 function initGoogle() {
   tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: CLIENT_ID, scope: SCOPE,
+    client_id: CLIENT_ID, 
+    scope: SCOPE,
     callback: r => {
       if (!r.access_token) return;
-      token = r.access_token; tokenExp = Date.now() + (r.expires_in - 60) * 1000;
-      try { sessionStorage.setItem('gcal', JSON.stringify({ token, exp: tokenExp })); } catch {}
+      token = r.access_token; 
+      tokenExp = Date.now() + (r.expires_in - 60) * 1000;
+      try { 
+        // In localStorage speichern, damit es über Browser-Sessions hinweg erhalten bleibt
+        localStorage.setItem('gcal_token_data', JSON.stringify({ token, exp: tokenExp })); 
+      } catch {}
       localStorage.setItem('gcal_linked', '1');
-      setCal(); status('Google Kalender verbunden.'); flush();
+      setCal(); 
+      status('Google Kalender verbunden.'); 
+      flush();
     },
-    error_callback: () => status('Verbindung zu Google abgebrochen.'),
+    error_callback: () => {
+      setCal();
+      status('Google-Anmeldung fehlgeschlagen oder abgebrochen.');
+    },
   });
+
+  // Wenn verknüpft, aber Token abgelaufen: im Hintergrund (silent) ein neues holen
+  if (linked() && !tokenValid()) {
+    refreshTokenSilent();
+  }
 }
+
+function refreshTokenSilent() {
+  if (!tokenClient) return;
+  try {
+    tokenClient.requestAccessToken({ prompt: '' });
+  } catch {
+    setCal();
+  }
+}
+
 let tries = 0;
 const waitGoogle = setInterval(() => {
   if (window.google?.accounts?.oauth2) { clearInterval(waitGoogle); initGoogle(); }
@@ -197,12 +227,18 @@ const waitGoogle = setInterval(() => {
 
 $('#cal-btn').addEventListener('click', () => {
   if (!tokenClient) return status('Google-Anmeldung nicht erreichbar. Bist du online?');
-  if (tokenValid()) {
+  if (tokenValid() || linked()) {
     if (!confirm('Kalender-Verbindung trennen?')) return;
-    google.accounts.oauth2.revoke(token, () => {});
-    token = null; sessionStorage.removeItem('gcal'); localStorage.removeItem('gcal_linked');
-    localStorage.removeItem('focus_stats_cache'); setCal();
-  } else tokenClient.requestAccessToken({ prompt: linked() ? '' : 'consent' });
+    try { google.accounts.oauth2.revoke(token, () => {}); } catch {}
+    token = null; 
+    localStorage.removeItem('gcal_token_data'); 
+    localStorage.removeItem('gcal_linked');
+    localStorage.removeItem('focus_stats_cache'); 
+    setCal();
+    status('Kalender-Verbindung getrennt.');
+  } else {
+    tokenClient.requestAccessToken({ prompt: 'consent' });
+  }
 });
 
 function queueEvent(start, end, mode) {
@@ -219,18 +255,37 @@ function queueEvent(start, end, mode) {
   });
   save('focus_pending', pending); flush();
 }
+
 async function flush() {
   if (!pending.length) return;
-  if (!tokenValid()) { setCal(); return status('Kalender neu verbinden (Einstellungen), dann wird die Session eingetragen.'); }
+  if (!tokenValid()) {
+    if (linked()) {
+      refreshTokenSilent();
+    } else {
+      setCal(); 
+    }
+    return;
+  }
   while (pending.length) {
     const ev = pending[0];
     try {
-      const res = await fetch(CAL_URL, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(ev) });
-      if (res.status === 401) { token = null; sessionStorage.removeItem('gcal'); setCal(); return status('Kalender neu verbinden (Einstellungen), dann wird die Session eingetragen.'); }
+      const res = await fetch(CAL_URL, { 
+        method: 'POST', 
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, 
+        body: JSON.stringify(ev) 
+      });
+      if (res.status === 401) { 
+        token = null; 
+        localStorage.removeItem('gcal_token_data'); 
+        setCal(); 
+        if (linked()) refreshTokenSilent();
+        return; 
+      }
       if (!res.ok) throw new Error(res.status);
-      pending.shift(); save('focus_pending', pending);
+      pending.shift(); 
+      save('focus_pending', pending);
       status(`Im Kalender gespeichert: ${ev.summary}`);
-    } catch { return status('Kalender-Sync fehlgeschlagen. Nächster Versuch folgt.'); }
+    } catch { return; }
   }
 }
 
@@ -249,7 +304,13 @@ async function fetchSessions() {
       const q = new URLSearchParams({ privateExtendedProperty: 'focusApp=1', timeMin: min.toISOString(), maxResults: '250', singleEvents: 'true' });
       if (page) q.set('pageToken', page);
       const res = await fetch(`${CAL_URL}?${q}`, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.status === 401) { token = null; sessionStorage.removeItem('gcal'); setCal(); return null; }
+      if (res.status === 401) { 
+        token = null; 
+        localStorage.removeItem('gcal_token_data'); 
+        setCal(); 
+        if (linked()) refreshTokenSilent();
+        return null; 
+      }
       if (!res.ok) return null;
       const data = await res.json();
       (data.items || []).forEach(e => {
