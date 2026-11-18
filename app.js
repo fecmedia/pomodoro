@@ -207,21 +207,34 @@ function setCal() {
 }
 
 function initGoogle() {
-  tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: CLIENT_ID, 
-    scope: SCOPE,
-    callback: r => {
-      if (!r.access_token) return;
-      token = r.access_token; 
-      tokenExp = Date.now() + (r.expires_in - 60) * 1000;
-      try { localStorage.setItem('gcal_token_data', JSON.stringify({ token, exp: tokenExp })); } catch {}
-      localStorage.setItem('gcal_linked', '1');
-      setCal(); status('Google Kalender verbunden.'); flush();
-    },
-    error_callback: () => { setCal(); status('Google-Anmeldung fehlgeschlagen oder abgebrochen.'); },
-  });
+  try {
+    tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: CLIENT_ID, 
+      scope: SCOPE,
+      callback: r => {
+        if (r.error) {
+          status(`Anmeldung abgelehnt: ${r.error}`);
+          return;
+        }
+        if (!r.access_token) return;
+        token = r.access_token; 
+        tokenExp = Date.now() + (r.expires_in - 60) * 1000;
+        try { localStorage.setItem('gcal_token_data', JSON.stringify({ token, exp: tokenExp })); } catch {}
+        localStorage.setItem('gcal_linked', '1');
+        setCal(); status('Google Kalender verbunden.'); flush();
+      },
+      error_callback: err => { 
+        setCal(); 
+        const errType = err?.type || 'Unbekannt';
+        status(`Google-Anmeldung fehlgeschlagen (${errType}). Pop-up blockiert?`);
+        console.warn('OAuth Error:', err);
+      },
+    });
 
-  if (linked() && !tokenValid()) refreshTokenSilent();
+    if (linked() && !tokenValid()) refreshTokenSilent();
+  } catch (e) {
+    console.error('Google Auth Init Error:', e);
+  }
 }
 
 function refreshTokenSilent() {
@@ -236,7 +249,7 @@ const waitGoogle = setInterval(() => {
 }, 300);
 
 $('#cal-btn').addEventListener('click', () => {
-  if (!tokenClient) return status('Google-Anmeldung nicht erreichbar. Bist du online?');
+  if (!tokenClient) return status('Google-Skript lädt noch. Bitte kurz warten.');
   if (tokenValid() || linked()) {
     if (!confirm('Kalender-Verbindung trennen?')) return;
     try { google.accounts.oauth2.revoke(token, () => {}); } catch {}
@@ -247,7 +260,12 @@ $('#cal-btn').addEventListener('click', () => {
     setCal();
     status('Kalender-Verbindung getrennt.');
   } else {
-    tokenClient.requestAccessToken({ prompt: 'consent' });
+    try {
+      tokenClient.requestAccessToken({ prompt: 'select_account' });
+    } catch (e) {
+      status('Fehler beim Öffnen des Login-Fensters.');
+      console.error(e);
+    }
   }
 });
 
@@ -282,10 +300,7 @@ async function flush() {
         body: JSON.stringify(ev) 
       });
       if (res.status === 401) { 
-        token = null; 
-        localStorage.removeItem('gcal_token_data'); 
-        setCal(); 
-        if (linked()) refreshTokenSilent();
+        token = status401Handler(); 
         return; 
       }
       if (!res.ok) throw new Error(res.status);
@@ -294,6 +309,14 @@ async function flush() {
       status(`Im Kalender gespeichert: ${ev.summary}`);
     } catch { return; }
   }
+}
+
+function status401Handler() {
+  token = null; 
+  localStorage.removeItem('gcal_token_data'); 
+  setCal(); 
+  if (linked()) refreshTokenSilent();
+  return null;
 }
 
 // ===== Statistik =====
