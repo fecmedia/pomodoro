@@ -1,7 +1,7 @@
 'use strict';
 
 // ===== Konfiguration =====
-const CLIENT_ID = '393963352444-b8qditk7v9pd3vir9o5q2msftq6dof3h.apps.googleusercontent.com';
+const CLIENT_ID = '393963352444-eshfjjpf59ej82k1htlu97bbjsetgpkl.apps.googleusercontent.com';
 const SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 const CAL_URL = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
 const LABEL = { focus: 'Fokus', break: 'Pause', long: 'Lange Pause' };
